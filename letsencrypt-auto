@@ -1,0 +1,151 @@
+#!/bin/sh -e
+#
+# A script to run the latest release version of the Let's Encrypt in a
+# virtual environment
+#
+# Installs and updates the letencrypt virtualenv, and runs letsencrypt
+# using that virtual environment.  This allows the client to function decently
+# without requiring specific versions of its dependencies from the operating
+# system.
+
+XDG_DATA_HOME=${XDG_DATA_HOME:-~/.local/share}
+VENV_NAME="letsencrypt"
+VENV_PATH=${VENV_PATH:-"$XDG_DATA_HOME/$VENV_NAME"}
+VENV_BIN=${VENV_PATH}/bin
+
+if test "`id -u`" -ne "0" ; then
+  SUDO=sudo
+else
+  SUDO=
+fi
+
+for arg in "$@" ; do
+  # This first clause is redundant with the third, but hedging on portability
+  if [ "$arg" = "-v" ] || [ "$arg" = "--verbose" ] || echo "$arg" | grep -E -- "-v+$" ; then
+    VERBOSE=1
+  elif [ "$arg" = "--debug" ] ; then
+    DEBUG=1
+  fi
+done
+
+ExperimentalBootstrap() {
+  # Arguments: Platform name, boostrap script name, SUDO command (iff needed)
+  if [ "$DEBUG" = 1 ] ; then
+    if [ "$2" != "" ]  ; then
+      echo "Bootstrapping dependencies for $1..."
+      if [ "$3" != "" ] ; then
+        "$3" "$BOOTSTRAP/$2"
+      else
+        "$BOOTSTRAP/$2"
+      fi
+    fi
+  else
+    echo "WARNING: $1 support is very experimental at present..."
+    echo "if you would like to work on improving it, please ensure you have backups"
+    echo "and then run this script again with the --debug flag!"
+    exit 1
+  fi
+}
+
+DeterminePythonVersion() {
+  if which python2 > /dev/null ; then
+    export LE_PYTHON=${LE_PYTHON:-python2}
+  elif which python2.7 > /dev/null ; then
+    export LE_PYTHON=${LE_PYTHON:-python2.7}
+  elif which python > /dev/null ; then
+    export LE_PYTHON=${LE_PYTHON:-python}
+  else
+    echo "Cannot find any Pythons... please install one!"
+  fi
+
+  PYVER=`$LE_PYTHON --version 2>&1 | cut -d" " -f 2 | cut -d. -f1,2 | sed 's/\.//'`
+  if [ $PYVER -eq 26 ] ; then
+    ExperimentalBootstrap "Python 2.6"
+  elif [ $PYVER -lt 26 ] ; then
+    echo "You have an ancient version of Python entombed in your operating system..."
+    echo "This isn't going to work."
+    exit 1
+  fi
+}
+
+
+# virtualenv call is not idempotent: it overwrites pip upgraded in
+# later steps, causing "ImportError: cannot import name unpack_url"
+if [ ! -d $VENV_PATH ]
+then
+  BOOTSTRAP=`dirname $0`/bootstrap
+  if [ ! -f $BOOTSTRAP/debian.sh ] ; then
+    echo "Cannot find the letsencrypt bootstrap scripts in $BOOTSTRAP"
+    exit 1
+  fi
+
+  if [ -f /etc/debian_version ] ; then
+    echo "Bootstrapping dependencies for Debian-based OSes..."
+    $SUDO $BOOTSTRAP/_deb_common.sh
+  elif [ -f /etc/redhat-release ] ; then
+    echo "Bootstrapping dependencies for RedHat-based OSes..."
+    $SUDO $BOOTSTRAP/_rpm_common.sh
+  elif [ -f /etc/arch-release ] ; then
+    echo "Bootstrapping dependencies for Archlinux..."
+    $SUDO $BOOTSTRAP/archlinux.sh
+  elif [ -f /etc/manjaro-release ] ; then
+    ExperimentalBootstrap "Manjaro Linux" manjaro.sh "$SUDO"
+  elif [ -f /etc/gentoo-release ] ; then
+    ExperimentalBootstrap "Gentoo" _gentoo_common.sh "$SUDO"
+  elif uname | grep -iq FreeBSD ; then
+    ExperimentalBootstrap "FreeBSD" freebsd.sh "$SUDO"
+  elif uname | grep -iq Darwin ; then
+    ExperimentalBootstrap "Mac OS X" mac.sh
+  else
+    echo "Sorry, I don't know how to bootstrap Let's Encrypt on your operating system!"
+    echo
+    echo "You will need to bootstrap, configure virtualenv, and run a pip install manually"
+    echo "Please see https://letsencrypt.readthedocs.org/en/latest/contributing.html#prerequisites"
+    echo "for more info"
+  fi
+
+  DeterminePythonVersion
+  echo "Creating virtual environment..."
+  if [ "$VERBOSE" = 1 ] ; then
+    virtualenv --no-site-packages --python $LE_PYTHON $VENV_PATH
+  else
+    virtualenv --no-site-packages --python $LE_PYTHON $VENV_PATH > /dev/null
+  fi
+else
+  DeterminePythonVersion
+fi
+
+
+printf "Updating letsencrypt and virtual environment dependencies..."
+if [ "$VERBOSE" = 1 ]  ; then
+  echo
+  $VENV_BIN/pip install -U setuptools
+  $VENV_BIN/pip install -U pip
+  $VENV_BIN/pip install -r py26reqs.txt -U letsencrypt letsencrypt-apache
+  # nginx is buggy / disabled for now, but upgrade it if the user has
+  # installed it manually
+  if $VENV_BIN/pip freeze | grep -q letsencrypt-nginx ; then
+    $VENV_BIN/pip install -U letsencrypt letsencrypt-nginx
+  fi
+else
+  $VENV_BIN/pip install -U setuptools > /dev/null
+  printf .
+  $VENV_BIN/pip install -U pip > /dev/null
+  printf .
+  # nginx is buggy / disabled for now...
+  $VENV_BIN/pip install -r py26reqs.txt
+  printf .
+  $VENV_BIN/pip install -U letsencrypt > /dev/null
+  printf .
+  $VENV_BIN/pip install -U letsencrypt-apache > /dev/null
+  if $VENV_BIN/pip freeze | grep -q letsencrypt-nginx ; then
+    printf .
+    $VENV_BIN/pip install -U letsencrypt-nginx > /dev/null
+  fi
+  echo
+fi
+
+# Explain what's about to happen, for the benefit of those getting sudo
+# password prompts...
+echo "Running with virtualenv:" $SUDO $VENV_BIN/letsencrypt "$@"
+$SUDO $VENV_BIN/letsencrypt "$@"
